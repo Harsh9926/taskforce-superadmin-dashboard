@@ -1,7 +1,13 @@
 // AI Service for Gemini Integration
 // This service handles AI analysis of daily reports
 
-import { ComplianceReport, RejectionAnalysisResult } from './dataService';
+import { ComplianceReport, RejectionAnalysisResult, ImageValidationResult } from './dataService';
+
+export interface ImageQuestionRule {
+  label: string;
+  ids: string[];
+  expectation: string;
+}
 
 export interface DailyReportData {
   date: string;
@@ -162,6 +168,30 @@ END OF REPORT
           : 'Automatic validation failed. Add notes explaining rejection rationale.',
         reviewedPhotos: AIService.collectReportPhotoUrls(report),
         aiModel: 'fallback-simulation',
+        generatedAt: new Date().toISOString()
+      };
+    }
+  }
+
+  static async analyzeReportImages(report: ComplianceReport, questionRules: ImageQuestionRule[]): Promise<ImageValidationResult> {
+    try {
+      const response = await fetch('/api/analyze-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report, questionRules })
+      });
+
+      if (!response.ok) {
+        throw new Error(`API call failed with status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error analyzing report images:', error);
+      return {
+        overallFindings: 'ChatGPT image validation is unavailable. Please verify photos manually.',
+        questionChecks: [],
+        aiModel: 'chatgpt:fallback',
         generatedAt: new Date().toISOString()
       };
     }

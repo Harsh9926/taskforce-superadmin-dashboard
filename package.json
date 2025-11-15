@@ -9,7 +9,8 @@
     "build": "next build && node -e \"const fs = require('fs'); fs.mkdirSync('out', { recursive: true }); fs.writeFileSync('out/.nojekyll', '')\"",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d out",
-    "test": "jest"
+    "test": "jest",
+    "start": "next start"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -31,6 +32,7 @@
     "lottie-react": "2.4.0",
     "lucide-react": "0.292.0",
     "next": "14.0.0",
+    "openai": "^4.27.0",
     "postcss": "8.4.0",
     "pptxgenjs": "^4.0.1",
     "puppeteer": "^24.23.0",

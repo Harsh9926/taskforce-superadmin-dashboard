@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   MapPin,
   Search,
@@ -23,6 +23,7 @@ import {
   Camera
 } from 'lucide-react'
 import { ComplianceReport, DataService, FeederPoint, Team, User } from '@/lib/dataService'
+import { AIService, ImageQuestionRule } from '@/lib/aiService'
 
 export default function FeederPointsPage() {
   const [feederPoints, setFeederPoints] = useState<FeederPoint[]>([])
@@ -152,6 +153,13 @@ export default function FeederPointsPage() {
 
     setFilteredFeederPoints(filtered)
   }
+
+  const handleReportUpdated = useCallback((reportId?: string, changes: Partial<ComplianceReport> = {}) => {
+    if (!reportId) return
+    setFeederPointReports(prev =>
+      prev.map(report => (report.id === reportId ? { ...report, ...changes } : report))
+    )
+  }, [])
 
   const loadReportsForFeederPoint = async (
     feederPoint: FeederPoint | null,
@@ -696,6 +704,7 @@ export default function FeederPointsPage() {
           }}
           statusFilter={reportStatusFilter}
           onStatusFilterChange={value => setReportStatusFilter(value)}
+          onReportUpdated={handleReportUpdated}
           onClose={() => {
             setShowDetailsModal(false)
             setSelectedFeederPoint(null)
@@ -740,6 +749,7 @@ interface FeederPointDetailsModalProps {
   onApplyDateRange: (range: { start: string; end: string }) => void
   statusFilter: 'all' | 'approved' | 'pending' | 'rejected' | 'requires_action'
   onStatusFilterChange: (value: 'all' | 'approved' | 'pending' | 'rejected' | 'requires_action') => void
+  onReportUpdated: (reportId?: string, changes?: Partial<ComplianceReport>) => void
   onClose: () => void
   onRefresh: () => void
 }
@@ -754,6 +764,7 @@ function FeederPointDetailsModal({
   onApplyDateRange,
   statusFilter,
   onStatusFilterChange,
+  onReportUpdated,
   onClose,
   onRefresh
 }: FeederPointDetailsModalProps) {
@@ -773,6 +784,8 @@ function FeederPointDetailsModal({
     { label: 'Requires Action', value: 'requires_action' }
   ]
   const [selectedReport, setSelectedReport] = useState<ComplianceReport | null>(null)
+  const [imageAnalysisLoading, setImageAnalysisLoading] = useState(false)
+  const [imageAnalysisError, setImageAnalysisError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!selectedReport) return
@@ -783,6 +796,47 @@ function FeederPointDetailsModal({
       setSelectedReport(null)
     }
   }, [filteredReports, selectedReport])
+
+  useEffect(() => {
+    if (!selectedReport) return
+    if (selectedReport.imageValidation) {
+      setImageAnalysisError(null)
+      return
+    }
+    if (!reportHasPhotos(selectedReport)) {
+      setImageAnalysisError('No photos attached for ChatGPT to validate for this report.')
+      return
+    }
+    let cancelled = false
+    const runAnalysis = async () => {
+      setImageAnalysisLoading(true)
+      setImageAnalysisError(null)
+      try {
+        const validation = await AIService.analyzeReportImages(selectedReport, IMAGE_VALIDATION_RULES)
+        if (cancelled) return
+        if (selectedReport.id) {
+          await DataService.saveImageValidation(selectedReport.id, validation)
+          onReportUpdated(selectedReport.id, { imageValidation: validation })
+        }
+        setSelectedReport(prev =>
+          prev && prev.id === selectedReport.id ? { ...prev, imageValidation: validation } : prev
+        )
+      } catch (error) {
+        console.error('Error running ChatGPT image validation:', error)
+        if (!cancelled) {
+          setImageAnalysisError('Unable to analyze photos right now. Please try again later.')
+        }
+      } finally {
+        if (!cancelled) {
+          setImageAnalysisLoading(false)
+        }
+      }
+    }
+    runAnalysis()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedReport, onReportUpdated])
 
   const handleRangeChange = (field: 'start' | 'end', value: string) => {
     onDateRangeChange({
@@ -957,16 +1011,7 @@ function FeederPointDetailsModal({
                 </section>
 
                 <section>
-                  <h3 className="text-xl font-semibold text-gray-900">5. Recommendations (Action-Oriented)</h3>
-                  <ol className="mt-3 space-y-1 pl-5 text-sm text-gray-700">
-                    {summary.recommendations.map((item, index) => (
-                      <li key={`recommendation-${index}`} className="list-decimal">{item}</li>
-                    ))}
-                  </ol>
-                </section>
-
-                <section>
-                  <h3 className="text-xl font-semibold text-gray-900">6. Photo Evidence Section</h3>
+                  <h3 className="text-xl font-semibold text-gray-900">5. Photo Evidence Section</h3>
                   <div className="mt-3 grid gap-4 md:grid-cols-3">
                     {summary.photoEvidence.map((item, index) => (
                       <div key={item.label} className="flex flex-col rounded-xl border border-gray-100 bg-white p-4 text-sm text-gray-700">
@@ -976,11 +1021,19 @@ function FeederPointDetailsModal({
                         </div>
                         {item.photoUrl ? (
                           <div className="h-32 overflow-hidden rounded-lg border border-gray-100">
-                            <img
-                              src={item.photoUrl}
-                              alt={item.label}
-                              className="h-full w-full object-cover"
-                            />
+                            <a
+                              href={item.photoUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="block h-full w-full transition-transform duration-200 hover:scale-105"
+                              title="Open full-size photo"
+                            >
+                              <img
+                                src={item.photoUrl}
+                                alt={item.label}
+                                className="h-full w-full object-cover"
+                              />
+                            </a>
                           </div>
                         ) : (
                           <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-gray-200 text-xs text-gray-400">
@@ -1024,17 +1077,18 @@ function FeederPointDetailsModal({
                         No reports match the selected status filter.
                       </div>
                     )}
-                    {filteredReports.map(report => (
-                      <div key={report.id || report.dailyTripId} className="rounded-lg border border-gray-100 p-3">
-                        <div className="flex flex-wrap items-center justify-between text-sm text-gray-600">
-                          <span className="font-semibold text-gray-900">
-                            {formatReportDate(report) || 'Unscheduled Submission'}
-                          </span>
-                          <span className="rounded-full bg-gray-50 px-2 py-0.5 text-xs capitalize text-gray-700">
-                            {report.status || 'pending'}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-sm font-medium text-gray-900">{report.title || 'Untitled Report'}</p>
+                    {filteredReports.map(report => {
+                      const displayTitle = report.title?.trim() ? report.title : 'Untitled Report'
+                      const displayDate = formatReportDate(report) || 'Unscheduled Submission'
+                      return (
+                        <div key={report.id || report.dailyTripId} className="rounded-lg border border-gray-100 p-3">
+                          <div className="flex flex-wrap items-center justify-between text-sm text-gray-600">
+                            <span className="font-semibold text-gray-900">{displayTitle}</span>
+                            <span className="rounded-full bg-gray-50 px-2 py-0.5 text-xs capitalize text-gray-700">
+                              {report.status || 'pending'}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 text-xs text-gray-500">{displayDate}</p>
                         {report.description && (
                           <p className="text-xs text-gray-500">{report.description}</p>
                         )}
@@ -1055,8 +1109,9 @@ function FeederPointDetailsModal({
                             <Eye className="h-4 w-4" />
                           </button>
                         </div>
-                      </div>
-                    ))}
+                        </div>
+                      )
+                    })}
                   </div>
                 </section>
 
@@ -1117,47 +1172,91 @@ function FeederPointDetailsModal({
                         </p>
                       </div>
                       <div>
-                        <h4 className="text-sm font-semibold text-gray-900">Gemini Evidence Review</h4>
-                        {selectedReport.status === 'rejected' ? (
-                          selectedReport.rejectionAnalysis ? (
-                            <div className="mt-2 space-y-2 rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
-                              <p className="font-semibold">Reason: {selectedReport.rejectionAnalysis.reason}</p>
-                              <p className="text-xs">{selectedReport.rejectionAnalysis.validationSummary}</p>
-                              <p className="text-xs">
-                                Model: {selectedReport.rejectionAnalysis.aiModel} · Generated{' '}
-                                {new Date(selectedReport.rejectionAnalysis.generatedAt).toLocaleString()}
-                              </p>
-                              <div className="text-xs">
-                                <p className="font-semibold">Photos reviewed</p>
-                                {selectedReport.rejectionAnalysis.reviewedPhotos?.length ? (
-                                  <ul className="list-disc pl-5">
-                                    {selectedReport.rejectionAnalysis.reviewedPhotos.map((url, idx) => (
-                                      <li key={`analysis-photo-${idx}`} className="truncate">
-                                        <a
-                                          href={url}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="text-blue-700 underline"
-                                        >
-                                          {url}
-                                        </a>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                ) : (
-                                  <p>No photo URLs were available.</p>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="mt-2 text-xs text-blue-800">
-                              Gemini has not returned a rejection summary yet. Please refresh once analysis completes.
-                            </p>
-                          )
-                        ) : (
+                        <h4 className="text-sm font-semibold text-gray-900">AI Evidence Review</h4>
+                        {imageAnalysisLoading && (
+                          <p className="mt-2 text-xs text-blue-600">ChatGPT is analyzing the photo evidence…</p>
+                        )}
+                        {!imageAnalysisLoading && imageAnalysisError && (
+                          <p className="mt-2 text-xs text-red-600">{imageAnalysisError}</p>
+                        )}
+                        {!imageAnalysisLoading && !imageAnalysisError && !selectedReport.imageValidation && (
                           <p className="mt-2 text-xs text-gray-500">
-                            AI evidence compression runs only for rejected reports. Status "{selectedReport.status || 'pending'}"
-                            does not include Gemini notes.
+                            ChatGPT is preparing the image compliance summary. Please refresh if this message persists.
+                          </p>
+                        )}
+                        {selectedReport.rejectionAnalysis && (
+                          <div className="mt-3 space-y-2 rounded-lg border border-red-100 bg-red-50 p-3 text-sm text-red-900">
+                            <p className="font-semibold">Rejection Reason: {selectedReport.rejectionAnalysis.reason}</p>
+                            <p className="text-xs">{selectedReport.rejectionAnalysis.validationSummary}</p>
+                            <p className="text-xs">
+                              Model: {selectedReport.rejectionAnalysis.aiModel} · Generated{' '}
+                              {new Date(selectedReport.rejectionAnalysis.generatedAt).toLocaleString()}
+                            </p>
+                          </div>
+                        )}
+                        {selectedReport.imageValidation && (
+                          <div className="mt-3 space-y-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
+                            <p>{selectedReport.imageValidation.overallFindings}</p>
+                            {selectedReport.imageValidation.questionChecks?.length ? (
+                              <div className="overflow-x-auto">
+                                <table className="min-w-full divide-y divide-blue-100 text-xs">
+                                  <thead>
+                                    <tr className="text-left text-blue-900">
+                                      <th className="px-3 py-2 font-semibold">Question</th>
+                                      <th className="px-3 py-2 font-semibold">Answer</th>
+                                      <th className="px-3 py-2 font-semibold">AI Verdict</th>
+                                      <th className="px-3 py-2 font-semibold">Summary</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-blue-100">
+                                    {selectedReport.imageValidation.questionChecks.map((check, index) => {
+                                      const verdict = formatValidationStatus(check.status)
+                                      return (
+                                        <tr key={`validation-${check.questionId || index}`}>
+                                          <td className="px-3 py-2">
+                                            <p className="font-semibold">{check.questionLabel || getQuestionLabel(check.questionId)}</p>
+                                            <p className="text-[11px] text-blue-800">{check.questionId}</p>
+                                          </td>
+                                          <td className="px-3 py-2">{check.answer || '—'}</td>
+                                          <td className="px-3 py-2">
+                                            <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${verdict.className}`}>
+                                              {verdict.label}
+                                            </span>
+                                          </td>
+                                          <td className="px-3 py-2">
+                                            <p>{check.summary}</p>
+                                            {check.photoEvidence?.length > 0 && (
+                                              <div className="mt-1 flex flex-wrap gap-2">
+                                                {check.photoEvidence.map((url, idx) => (
+                                                  <a
+                                                    key={`${check.questionId}-photo-${idx}`}
+                                                    href={url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-[11px] underline"
+                                                  >
+                                                    Photo {idx + 1}
+                                                  </a>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      )
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-blue-900">
+                                ChatGPT completed the scan but did not return per-question findings.
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        {!reportHasPhotos(selectedReport) && (
+                          <p className="mt-2 text-xs text-gray-500">
+                            No photo attachments were provided, so ChatGPT cannot match images to questions.
                           </p>
                         )}
                       </div>
@@ -1166,7 +1265,15 @@ function FeederPointDetailsModal({
                         <div className="mt-2 grid gap-3 md:grid-cols-3">
                           {aggregateReportPhotos(selectedReport).map(photo => (
                             <div key={photo} className="h-28 overflow-hidden rounded-lg border border-gray-100">
-                              <img src={photo} alt="Report evidence" className="h-full w-full object-cover" />
+                              <a
+                                href={photo}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="block h-full w-full transition-transform duration-200 hover:scale-105"
+                                title="Open full-size photo"
+                              >
+                                <img src={photo} alt="Report evidence" className="h-full w-full object-cover" />
+                              </a>
                             </div>
                           ))}
                           {aggregateReportPhotos(selectedReport).length === 0 && (
@@ -1256,6 +1363,43 @@ function getStatusBadgeClasses(status: ComplianceReport['status'] | undefined) {
   }
 }
 
+function formatValidationStatus(status: string | undefined) {
+  switch (status) {
+    case 'match':
+      return { label: 'Match', className: 'bg-green-100 text-green-800' }
+    case 'mismatch':
+      return { label: 'Mismatch', className: 'bg-red-100 text-red-800' }
+    case 'missing':
+      return { label: 'Missing', className: 'bg-yellow-100 text-yellow-800' }
+    default:
+      return { label: 'Uncertain', className: 'bg-gray-100 text-gray-700' }
+  }
+}
+
+function getQuestionLabel(questionId?: string) {
+  if (!questionId) return 'Unknown Question'
+  return QUESTION_LABEL_LOOKUP.get(questionId.toLowerCase()) || questionId
+}
+
+function buildQuestionLabelLookup(rules: ImageQuestionRule[]) {
+  const map = new Map<string, string>()
+  rules.forEach(rule => {
+    rule.ids.forEach(id => {
+      if (id) {
+        map.set(id.toLowerCase(), rule.label)
+      }
+    })
+  })
+  return map
+}
+
+function reportHasPhotos(report: ComplianceReport | null) {
+  if (!report) return false
+  const attachmentHasUrl = report.attachments?.some(attachment => Boolean(attachment?.url))
+  const answerHasPhoto = report.answers?.some(answer => answer.photos && answer.photos.length > 0)
+  return Boolean(attachmentHasUrl || answerHasPhoto)
+}
+
 const QUESTION_KEY_MAP = {
   zone: ['Q1', 'q1', 'q1_zone_name', 'zone_name'],
   ward: ['Q2', 'q2', 'q2_ward_number', 'ward_number'],
@@ -1267,6 +1411,41 @@ const QUESTION_KEY_MAP = {
   signboard: ['Q11', 'q11', 'q11_signboard_qr_display', 'signboard_qr_display', 'qr_display', 'visible_signboard'],
   overallScore: ['Q12', 'q12', 'overall_score', 'overall_compliance_rating']
 }
+
+const IMAGE_VALIDATION_RULES: ImageQuestionRule[] = [
+  {
+    label: 'Feeder Point Cleanliness',
+    ids: QUESTION_KEY_MAP.cleanliness,
+    expectation: 'Photos should show the feeder point ground area, swept and free from waste accumulations.'
+  },
+  {
+    label: 'Waste Segregation',
+    ids: QUESTION_KEY_MAP.segregation,
+    expectation: 'Photos should show wet and dry waste stored separately or colour-coded bins in use.'
+  },
+  {
+    label: 'Vehicle Availability',
+    ids: QUESTION_KEY_MAP.vehicle,
+    expectation: 'Photos should clearly show the assigned collection vehicle with registration visible.'
+  },
+  {
+    label: 'Swach Worker Presence',
+    ids: QUESTION_KEY_MAP.swachWorkers,
+    expectation: 'Photos should capture uniformed workers or the deployed team at the site.'
+  },
+  {
+    label: 'Signboard / QR Display',
+    ids: QUESTION_KEY_MAP.signboard,
+    expectation: 'Photos should showcase the feeder point signboard or QR panel clearly legible.'
+  },
+  {
+    label: 'Overall Compliance Rating',
+    ids: QUESTION_KEY_MAP.overallScore,
+    expectation: 'Provide any supporting photos that justify the claimed overall rating.'
+  }
+]
+
+const QUESTION_LABEL_LOOKUP = buildQuestionLabelLookup(IMAGE_VALIDATION_RULES)
 
 function createFeederPointReportSummary(feederPoint: any, rawReports: ComplianceReport[] = []) {
   const reports = [...rawReports]
@@ -1311,8 +1490,7 @@ function createFeederPointReportSummary(feederPoint: any, rawReports: Compliance
 
   const tripSummaries = buildTripSummaries(reports)
 
-  const observations = buildObservations(overallStatus, basicInfo, reports.length)
-  const recommendations = buildRecommendations(overallStatus)
+  const observations = buildObservations(overallStatus, reports.length)
 
   const photoEvidence = tripSummaries.map((trip, index) => ({
     label: `Trip ${index + 1} Photo`,
@@ -1324,7 +1502,6 @@ function createFeederPointReportSummary(feederPoint: any, rawReports: Compliance
     overallStatus,
     tripSummaries,
     observations,
-    recommendations,
     photoEvidence
   }
 }
@@ -1495,56 +1672,18 @@ function getPrimaryPhoto(report: ComplianceReport | null) {
   return null
 }
 
-function buildObservations(overallStatus: any, basicInfo: any, reportCount: number) {
+function buildObservations(overallStatus: any, reportCount: number) {
   const observations: string[] = []
 
-  observations.push(
-    reportCount > 0
-      ? `Latest submission recorded on ${basicInfo.date}.`
-      : 'No compliance submissions have been logged for this feeder point yet.'
-  )
+  if (reportCount === 0) {
+    observations.push('No compliance submissions have been logged for this feeder point yet.')
+  }
   observations.push(`Feeder point cleanliness is noted as ${overallStatus.cleanliness.toLowerCase()}.`)
   observations.push(`Segregation check outcome is ${overallStatus.segregation.toLowerCase()}.`)
   observations.push(`Swach worker presence recorded as ${overallStatus.swachWorkers}.`)
   observations.push(`Signboard / QR visibility marked ${overallStatus.signboard}.`)
 
   return observations.slice(0, 5)
-}
-
-function buildRecommendations(overallStatus: any) {
-  const recommendations: string[] = []
-
-  if (overallStatus.cleanliness !== 'Clean') {
-    recommendations.push('Schedule a focused cleaning drive before the next dispatch window.')
-  } else {
-    recommendations.push('Continue sustaining current sweeping standards before each trip.')
-  }
-
-  if (overallStatus.segregation !== 'Segregated') {
-    recommendations.push('Deploy a segregation marshal to check wet/dry segregation at arrival.')
-  } else {
-    recommendations.push('Document successful segregation checks with annotated photos.')
-  }
-
-  if (overallStatus.vehicle !== 'Present') {
-    recommendations.push('Assign a standby collection vehicle to avoid missed trips.')
-  } else {
-    recommendations.push('Keep vehicle readiness log updated with fuel and maintenance status.')
-  }
-
-  if (overallStatus.swachWorkers?.toLowerCase().includes('not')) {
-    recommendations.push('Realign swach worker roster to guarantee presence across all trips.')
-  } else {
-    recommendations.push('Rotate swach workers to prevent fatigue and keep PPE compliance high.')
-  }
-
-  if (overallStatus.signboard !== 'Yes') {
-    recommendations.push('Install or repair QR-enabled signage at the entry point for citizens.')
-  } else {
-    recommendations.push('Audit the QR signage weekly to ensure scanability and cleanliness.')
-  }
-
-  return recommendations.slice(0, 5)
 }
 
 function formatReportDate(report: ComplianceReport) {

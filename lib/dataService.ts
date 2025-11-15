@@ -67,10 +67,10 @@ export interface ComplianceReport {
   submittedBy?: string;
   attachments?: ComplianceReportAttachment[];
   rejectionAnalysis?: RejectionAnalysisResult;
+  imageValidation?: ImageValidationResult;
 }
 
 export interface ComplianceAnswer {
-  description: string;
   questionId: string;
   answer: 'yes' | 'no' | string;
   description?: string;
@@ -92,6 +92,22 @@ export interface RejectionAnalysisResult {
   reviewedPhotos: string[];
   aiModel: string;
   generatedAt: string;
+}
+
+export interface ImageValidationResult {
+  overallFindings: string;
+  questionChecks: ImageValidationQuestionCheck[];
+  aiModel: string;
+  generatedAt: string;
+}
+
+export interface ImageValidationQuestionCheck {
+  questionId: string;
+  questionLabel?: string;
+  answer?: string;
+  status: 'match' | 'mismatch' | 'missing' | 'uncertain';
+  summary: string;
+  photoEvidence: string[];
 }
 
 export interface AccessRequest {
@@ -785,6 +801,18 @@ export class DataService {
       console.log('✅ Compliance report status updated:', reportId, status);
     } catch (error) {
       console.error('❌ Error updating compliance report status:', error);
+      throw error;
+    }
+  }
+
+  static async saveImageValidation(reportId: string, analysis: ImageValidationResult): Promise<void> {
+    try {
+      await updateDoc(doc(db, 'complianceReports', reportId), {
+        imageValidation: analysis,
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      console.error('Error saving image validation result:', error);
       throw error;
     }
   }
